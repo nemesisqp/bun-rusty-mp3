@@ -78,7 +78,8 @@ full quantize + Huffman-select probes per granule, unoptimized.
 Prototype lives only in `/tmp/mp3vendored` (vendored 1.0.6 + the
 patch). It is NOT in this repo: shipping it means vendoring the crate
 (`[patch.crates-io]`), a fork that diverges from an upstream shipping
-~2 versions/day. Not done without a decision (see below).
+~2 versions/day. **Decision (2026-11-15, Phuong): leave it documented,
+no fork.**
 
 ## Other candidates (identified, not prototyped)
 
