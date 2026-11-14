@@ -1,0 +1,173 @@
+name: Release
+
+# Builds prebuilt napi binaries for every supported platform and publishes
+# the main package + all platform packages to npm.
+#
+# Triggered by pushing a semver tag (v0.1.0, v0.2.0, ...). Requires the
+# NPM_TOKEN repository secret: a npm *granular* access token with publish
+# access to this package and "Bypass 2FA" enabled (classic/automation
+# tokens were revoked by npm on 2025-12-09 and no longer exist).
+# NOTE: npm is removing direct publishing with granular tokens in
+# January 2027 — after that this workflow needs trusted publishing
+# (OIDC) or a stage-only token + manual 2FA approval. For a one-off
+# publish before then, the granular token above is enough.
+#
+# Deliberately NO source-build fallback anywhere: if a platform has no
+# prebuilt here, `npm install`/`bun install` must fail (see
+# scripts/check-prebuilt.js and the loader in lib/loader.js).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: build ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          # No x86_64-apple-darwin (Intel Mac): GitHub no longer has
+          # Intel macOS runners (macos-13 retired), so the job sat
+          # queued forever, and Intel Mac support is not needed.
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build -- --target aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build -- --target x86_64-pc-windows-msvc
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+            build: npm run build -- --target aarch64-pc-windows-msvc
+          - host: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            build: npm run build -- --target x86_64-unknown-linux-gnu
+          - host: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            build: npm run build -- --target aarch64-unknown-linux-gnu
+          - host: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            build: npm run build -- --target x86_64-unknown-linux-musl --cross-compile
+          - host: ubuntu-22.04
+            target: aarch64-unknown-linux-musl
+            build: npm run build -- --target aarch64-unknown-linux-musl --cross-compile
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.settings.target }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install cross toolchain (aarch64 GNU)
+        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      # Without this, cargo links aarch64 objects with the host x86_64
+      # `cc`, which chokes on the AArch64-only
+      # `--fix-cortex-a53-843419` flag (rust-lld: "only supported on
+      # AArch64"). The cross gcc handles it.
+      - name: Use the aarch64 cross linker
+        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      # musl builds go through `napi build --cross-compile`, which runs
+      # `cargo zigbuild` — that needs the zig compiler on PATH (the CLI
+      # never installs zig itself) plus cargo-zigbuild (auto-installed
+      # by the CLI on first use, but pre-installing is faster). The old
+      # `--zig` flag was removed in napi-rs CLI v3.
+      #
+      # Zig is downloaded directly instead of via mlugg/setup-zig:
+      # that action's latest release still runs on Node.js 20, so it
+      # triggers the Node 20 deprecation warning, and there is no
+      # Node 24 release of it. A plain shell step has no JS runtime
+      # and warns about nothing. Pinned to the latest stable at the
+      # time of writing; bump ZIG_VERSION when zig ships a new stable.
+      - name: Install zig (musl targets)
+        if: endsWith(matrix.settings.target, '-musl')
+        run: |
+          ZIG_VERSION=0.17.1
+          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          tar -xf /tmp/zig.tar.xz -C /tmp
+          echo "/tmp/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+          # NOTE: $GITHUB_PATH only applies to LATER steps, so the
+          # verification here must call zig by its full path.
+          /tmp/zig-x86_64-linux-${ZIG_VERSION}/zig version
+      - name: Install cargo-zigbuild (musl targets)
+        if: endsWith(matrix.settings.target, '-musl')
+        uses: taiki-e/install-action@cargo-zigbuild
+      - run: npm ci
+      # No RUSTFLAGS target-cpu here, ever: prebuilts must run on any CPU of
+      # the arch. rusty_mp3 dispatches SIMD at runtime (see README).
+      - run: ${{ matrix.settings.build }}
+        env:
+          RUSTFLAGS: ''
+      - uses: actions/upload-artifact@v6
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: '*.node'
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: bindings-*
+          path: artifacts
+          merge-multiple: true
+      - run: npx napi create-npm-dirs
+      - name: Place each .node in its platform package dir
+        run: |
+          for f in artifacts/*.node; do
+            triple=$(basename "$f" | sed 's/^bun-rusty-mp3\.//; s/\.node$//')
+            cp "$f" "npm/$triple/"
+            echo "$triple <- $f"
+          done
+          ls npm/*/ | head -40
+      # --no-gh-release: by default prepublish also creates a GitHub
+      # Release, which needs a lerna-style release commit ("chore(release):
+      # publish / - @ndqp/bun-rusty-mp3@x.y.z") — our tagged commits are
+      # normal commits, so it dies with "No release commit found". We only
+      # publish to npm, so skip the GitHub Release entirely.
+      # --skip-optional-publish: prepublish would publish the platform
+      # packages itself (without --access public, so they'd default to
+      # restricted), and then the "Publish platform packages" step below
+      # would try to publish the same versions again and fail. Let that
+      # step do the publishing, with --access public.
+      # NODE_AUTH_TOKEN is required here too: prepublish runs `npm publish`
+      # internally, and setup-node's .npmrc reads the token from this env
+      # var. Without it the publish goes out unauthenticated and npm
+      # answers 404 (it returns 404 instead of 401 to avoid leaking
+      # whether a package exists).
+      - run: npx napi prepublish --no-gh-release --skip-optional-publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish main package
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish platform packages
+        run: |
+          for dir in npm/*/; do
+            (cd "$dir" && npm publish --access public)
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

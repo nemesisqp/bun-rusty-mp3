@@ -1,0 +1,37 @@
+[package]
+name = "bun-rusty-mp3"
+version = "0.1.0"
+edition = "2021"
+description = "Bun/Node bindings to rusty_mp3 — a pure-Rust MP3 codec, drop-in replacement for @breezystack/lamejs"
+license = "MIT"
+authors = ["Muse"]
+repository = "https://github.com/nemesisqp/bun-rusty-mp3"
+readme = "README.md"
+rust-version = "1.85"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+# Exact pin: rusty_mp3's README states encoder output may change in minor
+# releases when quality improves (1.x API is stable, encoder bytes are not
+# guaranteed stable). Pin exact so a `cargo update` never silently changes
+# encoded output; bump deliberately with a re-run of the test suite + bench.
+rusty_mp3 = "=1.0.6"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# Portable prebuilts: rusty_mp3 already runtime-dispatches SIMD
+# (AVX on x86_64, NEON on aarch64 — see its README), so one binary runs
+# on any CPU of its arch. Do NOT add `-C target-cpu=native` here or in
+# CI: a binary built with `native` on the CI runner can SIGILL on a
+# user's older CPU. `target-cpu=native` is only for a dev-local build
+# (scripts/build-local.sh).
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
