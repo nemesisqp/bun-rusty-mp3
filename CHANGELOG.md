@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 — 2026-11-17
+
+Release to validate npm trusted publishing (OIDC). The release
+workflow was migrated to OIDC in 07f0c61; no code changes.
+
 ## 0.1.0 — 2026-11-15
 
 First release (code complete; npm publish pending the owner's token).

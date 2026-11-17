@@ -1,6 +1,6 @@
 [package]
 name = "bun-rusty-mp3"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Bun/Node bindings to rusty_mp3 — a pure-Rust MP3 codec, drop-in replacement for @breezystack/lamejs"
 license = "MIT"
